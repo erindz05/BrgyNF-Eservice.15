@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payment Check</title>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 16px; background: #f4f6f4; color: #1b2a22; line-height: 1.45; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .box { background: #fff; border: 1px solid #cfd8d2; border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+  .ok { border-left: 6px solid #2e7d32; } .bad { border-left: 6px solid #c62828; background: #fff4f4; } .wait { border-left: 6px solid #999; }
+  .raw { font-family: monospace; font-size: 12px; background: #eef1ee; padding: 6px; border-radius: 6px; word-break: break-all; margin-top: 6px; }
+  button, a.btn { display: block; width: 100%; box-sizing: border-box; text-align: center; background: #1f5d3c; color: #fff; border: 0; border-radius: 10px; padding: 14px; font-size: 16px; font-weight: bold; text-decoration: none; margin: 12px 0; }
+  small { color: #555; }
+</style>
+</head>
+<body>
+<h1>Payment Check (for testing only)</h1>
+<small>Put this file in the applicant folder next to index.html. It saves ONE test application (Business Permit, Group A, PHP 1,000), asks PayRex for a payment page, and tells you exactly which step fails. Delete the test application afterwards in the staff site (Trash).</small>
+<button id="go" type="button">Run the check</button>
+<div id="out"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+(function () {
+  var out = document.getElementById("out");
+  function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+  function step(kind, title, msg, raw) {
+    var d = document.createElement("div");
+    d.className = "box " + kind;
+    d.innerHTML = "<b>" + (kind === "ok" ? "OK - " : kind === "bad" ? "PROBLEM - " : "") + esc(title) + "</b><br>" + msg + (raw ? '<div class="raw">' + esc(raw) + "</div>" : "");
+    out.appendChild(d);
+    return d;
+  }
+  function hintFor(text) {
+    var t = String(text || "");
+    if (/Invalid schema/i.test(t)) return "Supabase > Project Settings > Data API: enable the Data API and add <b>public</b> to Exposed schemas, then Save.";
+    if (/does not exist|could not find the function|schema cache/i.test(t)) return "The database is not set up. Supabase > SQL Editor: run <b>supabase_FULL.sql</b> (the whole file), then try again.";
+    if (/permission denied/i.test(t)) return "Run <b>supabase_FULL.sql</b> in the SQL Editor, then try again.";
+    if (/Invalid fee/i.test(t)) return "The price was not saved with the application. Run <b>supabase_FULL.sql</b> in the SQL Editor (it contains the missing update), then try again.";
+    if (/not configured on the server/i.test(t)) return "Supabase > Edge Functions > Secrets: add <b>PAYREX_SECRET_KEY</b> (exact spelling) with your sk_test_ key. Then re-deploy create-payment once.";
+    if (/SITE_URL|No return address/i.test(t)) return "Supabase > Edge Functions > Secrets: add <b>SITE_URL</b> = your website link (https://...).";
+    if (/PayRex says \(401/i.test(t) || /rejected the key/i.test(t)) return "PayRex rejected the key. In PayRex (Test mode ON) > Developers > API keys, copy the <b>SECRET</b> key (sk_test_...), not the pk_ key, and save it again as PAYREX_SECRET_KEY.";
+    if (/PayRex says/i.test(t)) return "PayRex refused the request. Read the message in the box below. If it mentions a payment method, add the secret <b>PAYREX_METHODS</b> = <b>card</b> (or <b>gcash</b>).";
+    if (/Failed to send a request|FunctionsFetchError|Failed to fetch|NetworkError/i.test(t)) return "The website cannot reach the function. In Supabase > Edge Functions the function must be named exactly <b>create-payment</b> and show as deployed.";
+    if (/non-2xx|FunctionsHttpError/i.test(t)) return "The function answered with an error. Open Supabase > Edge Functions > create-payment > Logs and read the last red line.";
+    if (/Invalid JWT|401/i.test(t)) return "Supabase refused the call. Make sure SUPABASE_KEY in config.js is the <b>anon public</b> key (starts with eyJ).";
+    return "";
+  }
+  async function run() {
+    out.innerHTML = "";
+    var cfg = window.APP_CONFIG || {};
+    // 1) config
+    if (!cfg.SUPABASE_URL || /YOUR_/.test(cfg.SUPABASE_URL) || !cfg.SUPABASE_KEY || /YOUR_/.test(cfg.SUPABASE_KEY)) {
+      step("bad", "1. config.js", "SUPABASE_URL / SUPABASE_KEY are still empty or say YOUR_... in <b>this folder's</b> config.js (the site is in demo mode, so PayRex is never called).");
+      return;
+    }
+    if (!window.supabase) { step("bad", "1. config.js", "The Supabase library did not load. Check your internet and reload."); return; }
+    step("ok", "1. config.js", "Supabase URL and key are filled in. ENABLE_ONLINE_PAYMENT = " + String(cfg.ENABLE_ONLINE_PAYMENT) + (cfg.ENABLE_ONLINE_PAYMENT ? "" : " &lt;-- must be <b>true</b> in config.js"));
+    var db = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_KEY);
+
+    // 2) save a test application
+    var w = step("wait", "2. Saving a test application…", "");
+    var r = await db.rpc("submit_application", {
+      p_name: "PAYMENT TEST",
+      p_doc_type: "Business Permit",
+      p_details: { "Application Type": "New", "Business Group": "Group A", "Group Code": "A", "Owner": "PAYMENT TEST" }
+    });
+    if (r.error) {
+      w.remove();
+      var m = r.error.message || JSON.stringify(r.error);
+      step("bad", "2. Saving the application", esc(m) + "<br>" + hintFor(m), JSON.stringify(r.error));
+      return;
+    }
+    w.remove();
+    var serial = r.data;
+    step("ok", "2. Application saved", "Reference number <b>" + esc(serial) + "</b> (this is a test record).");
+
+    // 3) ask for the PayRex page
+    var w3 = step("wait", "3. Asking PayRex for a payment page…", "");
+    var f = await db.functions.invoke("create-payment", { body: { serial: serial, returnUrl: location.href.split("#")[0].split("?")[0].replace(/paycheck\.html$/, "") } });
+    w3.remove();
+    if (f.error) {
+      var why = f.error.message || String(f.error), raw = "";
+      try { var b = await f.error.context.json(); if (b && b.error) why = b.error; raw = JSON.stringify(b); } catch (e) {}
+      step("bad", "3. Create the PayRex payment page", esc(why) + "<br>" + hintFor(why + " " + (f.error.name || "")), raw);
+      return;
+    }
+    if (!f.data || !f.data.url) { step("bad", "3. Create the PayRex payment page", "The function answered but gave no payment link.", JSON.stringify(f.data)); return; }
+    step("ok", "3. PayRex payment page created", "Everything works. Tap the button to open PayRex (test mode, no real money).");
+    var a = document.createElement("a");
+    a.className = "btn"; a.href = f.data.url; a.textContent = "Open the PayRex payment page";
+    out.appendChild(a);
+  }
+  document.getElementById("go").addEventListener("click", function () { run().catch(function (e) { step("bad", "Unexpected error", esc(e.message || e)); }); });
+})();
+</script>
+</body>
+</html>
